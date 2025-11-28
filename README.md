@@ -1,6 +1,6 @@
 # IR
 
-#TRY DEMO
+# TRY DEMO
 
   git clone https://github.com/cshyun1031/IR.git
   cd IR
