@@ -132,7 +132,7 @@ def IR():
 
     from torch.jit import save
     # --- 1. 파일 경로 및 검색 설정 ---
-    INDEX_FILE_PATH = "DB/dinov2_product_catalog_original_image.faiss" # 저장된 .faiss 파일 이름
+    INDEX_FILE_PATH = "DB/dinov2_product_catalog2.faiss" # 저장된 .faiss 파일 이름
     TEST_DIR = 'output_crops'
 
     # 마운트된 Google Drive의 테스트 이미지 폴더 경로 (사용자 환경에 맞게 수정하세요!)
@@ -233,7 +233,7 @@ def IR():
         # ---------------------------------------------------------
         # 4. 최종 1위 선정 및 DB 조회
         best_id, best_count, best_score = final_ranking[0]
-        labels = np.load('catalog_labels.npy') # 데이터 로드. @파일명
+        labels = np.load('catalog_labels2.npy') # 데이터 로드. @파일명
         model_name=labels[best_id]
         # DB에서 이름 가져오기 
         # try:
