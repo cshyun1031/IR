@@ -2,61 +2,100 @@ import cv2
 import os
 import numpy as np
 
-# model(이미지)의 리턴값인 results[0] = result, 처리한 이미지가 filename(sample_test/image1, image2, image3...)
-def crop_by_result(result, filename, output_dir='output_crops'):
+def crop_by_result(result, filename, output_dir='output_crops', label_map=None):
+    """
+    YOLO/SAM 결과를 기반으로 이미지를 Crop하여 저장하고,
+    해당 객체들의 Raw Mask 데이터를 딕셔너리로 반환하는 함수.
+    
+    Args:
+        result: Ultralytics 모델 예측 결과 객체
+        filename: 원본 이미지 파일명
+        output_dir: 저장할 루트 디렉토리
+        label_map: {class_id(int): class_name(str)} 형태의 매핑 딕셔너리 (옵션)
+        
+    Returns:
+        mask_dict: { "폴더명(ClassName)": [raw_mask_array, ...] }
+    """
+    
     orig_img = result.orig_img
     h, w, _ = orig_img.shape
 
-    # 마스크나 박스가 없으면 종료
+    # 반환할 딕셔너리 초기화
+    mask_dict = {}
+
+    # 탐지된 객체가 없으면 빈 딕셔너리 반환
     if result.masks is None:
-        print("탐지된 객체가 없습니다.")
-        return
+        # print(f"[{filename}] 탐지된 객체가 없습니다.")
+        return mask_dict
 
-    # 2. 각 객체별로 반복 처리
-    # result.boxes: 바운딩 박스 정보
-    # result.masks.data: 마스크 데이터 (GPU 텐서일 수 있음)
+    # 데이터 추출
+    # masks: (N, H_out, W_out) - 모델 출력 해상도의 마스크
+    masks = result.masks.data.cpu().numpy()
+    boxes = result.boxes.xyxy.cpu().numpy()
+    cls_ids = result.boxes.cls.cpu().numpy()
 
-    masks = result.masks.data.cpu().numpy() # 텐서를 넘파이 배열로 변환
-    boxes = result.boxes.xyxy.cpu().numpy() # 박스 좌표 (x1, y1, x2, y2)
-    cls_ids = result.boxes.cls.cpu().numpy() # 클래스 ID
+    # 중복 저장 방지용 (Shape 기준)
+    seen = []
 
     for i, mask in enumerate(masks):
-        # --- [Step A] 마스크 크기 맞추기 ---
-        # YOLO 마스크는 보통 640x640 등의 추론 크기로 나오므로 원본 크기로 리사이징 필요
-        # cv2.resize(src, dsize=(width, height))
-        mask = mask.astype(np.uint8)
-        resized_mask = cv2.resize(mask, (w, h))
+        # ---------------------------------------------------------
+        # [Step 1] 저장될 폴더명(= Class Name) 결정
+        # ---------------------------------------------------------
+        idx = int(cls_ids[i])
+        
+        # 1순위: 외부에서 주입된 label_map (예: YOLO가 찾은 실제 이름)
+        if label_map is not None and idx in label_map:
+            class_name = label_map[idx]
+        # 2순위: 모델 내장 이름
+        elif result.names and idx in result.names:
+            class_name = result.names[idx]
+        # 3순위: 그냥 숫자 ID
+        else:
+            class_name = str(idx)
 
-        # 마스크 이진화 (0 아니면 1로 확실하게 구분)
-        # 보통 0.5 이상을 객체로 판단
+        # ---------------------------------------------------------
+        # [Step 2] 이미지 저장용 프로세싱 (Crop & RGBA)
+        # ---------------------------------------------------------
+        # 시각화를 위해 원본 크기로 리사이징
+        mask_u8 = mask.astype(np.uint8)
+        resized_mask = cv2.resize(mask_u8, (w, h))
         binary_mask = (resized_mask > 0.5).astype(np.uint8) * 255
 
-        # --- [Step B] 투명 배경 이미지 만들기 (BGRA) ---
-        # 원본 이미지(BGR) 채널 분리
+        # 투명 배경 이미지 생성
         b, g, r = cv2.split(orig_img)
-
-        # 알파 채널로 마스크 사용 (배경은 0=투명, 객체는 255=불투명)
         rgba_img = cv2.merge([b, g, r, binary_mask])
 
-        # --- [Step C] Bounding Box로 Crop ---
+        # Bounding Box 좌표 추출 및 클리핑
         x1, y1, x2, y2 = boxes[i].astype(int)
-
-        # 좌표가 이미지 범위를 벗어나지 않도록 클리핑
         x1 = max(0, x1); y1 = max(0, y1)
         x2 = min(w, x2); y2 = min(h, y2)
-
-        # 이미지 자르기 (y축 먼저, x축 나중)
+        
+        # 이미지 Crop
         crop_img = rgba_img[y1:y2, x1:x2]
 
-        # --- [Step D] 저장 ---
-        class_name = result.names[int(cls_ids[i])]
-        # file_name = f"{class_name}_{i}.png" # 투명도 저장을 위해 반드시 png 사용
-        # 2. 확장자 분리 ('test.jpg' -> 'test', '.jpg')
+        # ---------------------------------------------------------
+        # [Step 3] 파일 저장 및 데이터 수합
+        # ---------------------------------------------------------
+        # 중복 검사 (이미지 Shape 기준)
+        if crop_img.shape not in seen:
+            seen.append(crop_img.shape)
+            
+            # 1. 파일 저장 (폴더명 = class_name)
+            class_dir = os.path.join(output_dir, class_name)
+            os.makedirs(class_dir, exist_ok=True)
+            
+            base_name = os.path.splitext(os.path.basename(filename))[0]
+            file_name = f"{base_name}_{i}.png"
+            save_path = os.path.join(class_dir, file_name)
+            
+            cv2.imwrite(save_path, crop_img)
+            # print(f"[저장 완료] {save_path}")
 
-        # 3. 파일명 생성 ('test_chair_0.png')
-        file_name = f"{class_name}/{filename}_{i}.png"
+            # 2. 마스크 딕셔너리 저장 (Key = class_name)
+            if class_name not in mask_dict:
+                mask_dict[class_name] = []
+            
+            # [중요] 가공되지 않은 Raw Mask 원본을 저장
+            mask_dict[class_name].append(mask)
 
-        # 4. 저장 경로 결합
-        save_path = os.path.join(output_dir, file_name)
-        cv2.imwrite(save_path, crop_img)
-        print(f"[저장 완료] {save_path} (크기: {crop_img.shape})")
+    return mask_dict
